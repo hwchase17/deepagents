@@ -85,7 +85,7 @@ The agent (and any subagents) will have access to these tools.
 
 The second argument to `create_deep_agent` is `instructions`.
 This will serve as part of the prompt of the deep agent.
-Note that there is a [built in system prompt](#built-in-prompt) as well, so this is not the *entire* prompt the agent will see.
+Note that there is a [built in system prompt](src/deepagents/prompts.py) as well, so this is not the *entire* prompt the agent will see.
 
 ### `subagents` (Optional)
 
@@ -126,8 +126,29 @@ agent = create_deep_agent(
 
 ### `model` (Optional)
 
-By default, `deepagents` will use `"claude-sonnet-4-20250514"`. If you want to use a different model,
-you can pass a [LangChain model object](https://python.langchain.com/docs/integrations/chat/).
+By default, `deepagents` uses `"claude-sonnet-4-20250514"`. You can customize this by passing any [LangChain model object](https://python.langchain.com/docs/integrations/chat/).
+
+#### Example: Using a Custom Model
+
+Here's how to use a custom model (like OpenAI's `gpt-oss` model via Ollama):
+
+(Requires `pip install langchain` and then `pip install langchain-ollama` for Ollama models)
+
+```python
+from deepagents import create_deep_agent
+
+# ... existing agent definitions ...
+
+model = init_chat_model(
+    model="ollama:gpt-oss:20b",  
+)
+agent = create_deep_agent(
+    tools=tools,
+    instructions=instructions,
+    model=model,
+    ...
+)
+```
 
 ## Deep Agent Details
 
@@ -138,7 +159,7 @@ The below components are built into `deepagents` and helps make it work for deep
 `deepagents` comes with a [built-in system prompt](src/deepagents/prompts.py). This is relatively detailed prompt that is heavily based on and inspired by [attempts](https://github.com/kn1026/cc/blob/main/claudecode.md) to [replicate](https://github.com/asgeirtj/system_prompts_leaks/blob/main/Anthropic/claude-code.md)
 Claude Code's system prompt. It was made more general purpose than Claude Code's system prompt.
 This contains detailed instructions for how to use the built-in planning tool, file system tools, and sub agents.
-Note that part of this system prompt [can be customized](#promptprefix--required-)
+Note that part of this system prompt [can be customized](#instructions-required)
 
 Without this default system prompt - the agent would not be nearly as successful at going as it is.
 The importance of prompting for creating a "deep" agent cannot be understated.
@@ -175,15 +196,45 @@ result["files"]
 
 `deepagents` comes with the built-in ability to call sub agents (based on Claude Code).
 It has access to a `general-purpose` subagent at all times - this is a subagent with the same instructions as the main agent and all the tools that is has access to.
-You can also specify [custom sub agents](#subagents--optional-) with their own instructions and tools.
+You can also specify [custom sub agents](#subagents-optional) with their own instructions and tools.
 
 Sub agents are useful for ["context quarantine"](https://www.dbreunig.com/2025/06/26/how-to-fix-your-context.html#context-quarantine) (to help not pollute the overall context of the main agent)
 as well as custom instructions.
 
+## MCP
+
+The `deepagents` library can be ran with MCP tools. This can be achieved by using the [Langchain MCP Adapter library](https://github.com/langchain-ai/langchain-mcp-adapters).
+
+(To run the example below, will need to `pip install langchain-mcp-adapters`)
+
+```python
+import asyncio
+from langchain_mcp_adapters.client import MultiServerMCPClient
+from deepagents import create_deep_agent
+
+async def main():
+    # Collect MCP tools
+    mcp_client = MultiServerMCPClient(...)
+    mcp_tools = await mcp_client.get_tools()
+
+    # Create agent
+    agent = create_deep_agent(tools=mcp_tools, ....)
+
+    # Stream the agent
+    async for chunk in agent.astream(
+        {"messages": [{"role": "user", "content": "what is langgraph?"}]},
+        stream_mode="values"
+    ):
+        if "messages" in chunk:
+            chunk["messages"][-1].pretty_print()
+
+asyncio.run(main())
+```
+
 ## Roadmap
-[] Allow users to customize full system prompt
-[] Code cleanliness (type hinting, docstrings, formating)
-[] Allow for more of a robust virtual filesystem
-[] Create an example of a deep coding agent built on top of this
-[] Benchmark the example of [deep research agent](examples/research/research_agent.py)
-[] Add human-in-the-loop support for tools
+- [ ] Allow users to customize full system prompt
+- [ ] Code cleanliness (type hinting, docstrings, formating)
+- [ ] Allow for more of a robust virtual filesystem
+- [ ] Create an example of a deep coding agent built on top of this
+- [ ] Benchmark the example of [deep research agent](examples/research/research_agent.py)
+- [ ] Add human-in-the-loop support for tools
