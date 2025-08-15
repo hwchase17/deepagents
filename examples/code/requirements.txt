@@ -1,0 +1,3 @@
+# Core requirements
+deepagents
+langgraph-cli[inmem]
