@@ -21,7 +21,9 @@ class SubAgent(TypedDict):
     model_settings: NotRequired[dict[str, Any]]
 
 
-def _create_task_tool(tools, instructions, subagents: list[SubAgent], model, state_schema):
+def _create_task_tool(
+    tools, instructions, subagents: list[SubAgent], model, state_schema
+):
     agents = {
         "general-purpose": create_react_agent(model, prompt=instructions, tools=tools)
     }
