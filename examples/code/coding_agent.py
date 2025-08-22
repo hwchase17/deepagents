@@ -3,15 +3,49 @@ import subprocess
 import tempfile
 import platform
 import requests
-from typing import List, Dict, Any, Optional, Union
+from typing import List, Dict, Any, Optional, Union, Literal
 from pathlib import Path
 
+from tavily import TavilyClient
 from deepagents import create_deep_agent, SubAgent
+from post_model_hook import create_coding_agent_post_model_hook
+from utils import validate_command_safety
+from subagents import code_reviewer_agent, test_generator_agent
+from langgraph.types import Command
+from state import CodingAgentState
+from coding_instructions import get_coding_instructions
 
+# LangSmith tracing imports
+from langsmith import Client
+from langsmith.wrappers import wrap_openai
+from langchain_core.tracers.langchain import LangChainTracer
+import dotenv
+
+dotenv.load_dotenv()
+
+# Define the target directory for the coding agent
+# TARGET_DIRECTORY = os.environ.get("OPEN_SWE_LOCAL_PROJECT_PATH")
+
+# Initialize LangSmith client and tracing
+langsmith_client = None
+langchain_tracer = None
+
+# Initialize LangSmith if API key is available
+if os.environ.get("LANGCHAIN_API_KEY"):
+    try:
+        langsmith_client = Client()
+        langchain_tracer = LangChainTracer(
+            project_name=os.environ.get("LANGCHAIN_PROJECT", "coding-agent"),
+            client=langsmith_client
+        )
+    except Exception as e:
+        print(f"Warning: Failed to initialize LangSmith tracing: {e}")
+
+tavily_client = TavilyClient(api_key=os.environ["TAVILY_API_KEY"])
 
 def execute_bash(command: str, timeout: int = 30, cwd: str = None) -> Dict[str, Any]:
     """
-    Execute bash/shell commands safely.
+    Execute bash/shell commands safely with prompt injection detection and human approval.
 
     Args:
         command: Shell command to execute
@@ -22,7 +56,19 @@ def execute_bash(command: str, timeout: int = 30, cwd: str = None) -> Dict[str, 
         Dictionary with execution results including stdout, stderr, and success status
     """
     try:
-        # Determine the appropriate shell based on platform
+        # First, validate command safety (focusing on prompt injection)
+        safety_validation = validate_command_safety(command)
+        
+        # If command is not safe, return error without executing
+        if not safety_validation.is_safe:
+            return {
+                "success": False,
+                "stdout": "",
+                "stderr": f"Command blocked - safety validation failed:\nThreat Type: {safety_validation.threat_type}\nReasoning: {safety_validation.reasoning}\nDetected Patterns: {', '.join(safety_validation.detected_patterns)}",
+                "return_code": -1,
+                "safety_validation": safety_validation.model_dump()
+            }
+        
         if platform.system() == "Windows":
             shell_cmd = ["cmd", "/c", command]
         else:
@@ -38,6 +84,7 @@ def execute_bash(command: str, timeout: int = 30, cwd: str = None) -> Dict[str, 
             "stdout": result.stdout,
             "stderr": result.stderr,
             "return_code": result.returncode,
+            "safety_validation": safety_validation.model_dump()
         }
 
     except subprocess.TimeoutExpired:
@@ -134,146 +181,51 @@ def http_request(
             "url": url,
         }
 
+def web_search(
+    query: str,
+    max_results: int = 5,
+    topic: Literal["general", "news", "finance"] = "general",
+    include_raw_content: bool = False,
+):
+    """Search the web using Tavily for programming-related information."""
+    if tavily_client is None:
+        return {
+            "error": "Tavily API key not configured. Please set TAVILY_API_KEY environment variable.",
+            "query": query
+        }
+    
+    try:
+        search_docs = tavily_client.search(
+            query,
+            max_results=max_results,
+            include_raw_content=include_raw_content,
+            topic=topic,
+        )
+        return search_docs
+    except Exception as e:
+        return {
+            "error": f"Web search error: {str(e)}",
+            "query": query
+        }
 
-# Sub-agent for code review and analysis
-code_reviewer_prompt = """You are an expert code reviewer for all programming languages. Your job is to analyze code for:
+# Get coding instructions from separate file
+coding_instructions = get_coding_instructions()
 
-1. **Code Quality**: Check for clean, readable, and maintainable code
-2. **Best Practices**: Ensure adherence to language-specific best practices and conventions
-3. **Security**: Identify potential security vulnerabilities
-4. **Performance**: Suggest optimizations where applicable
-5. **Testing**: Evaluate test coverage and quality
-6. **Documentation**: Check for proper comments and documentation
+# Create the post model hook
+post_model_hook = create_coding_agent_post_model_hook()
 
-When reviewing code, provide:
-- Specific line-by-line feedback
-- Language-specific suggestions for improvements
-- Security concerns (if any)
-- Performance optimization opportunities
-- Overall assessment and rating (1-10)
+# Create the coding agent with interrupt handling and LangSmith tracing
+config = {"recursion_limit": 1000}
 
-You can use bash commands to run linters, formatters, and other code analysis tools for any language.
-Be constructive and educational in your feedback. Focus on helping improve the code quality."""
+# Add LangSmith tracer to config if available
+if langchain_tracer:
+    config["callbacks"] = [langchain_tracer]
 
-code_reviewer_agent = {
-    "name": "code-reviewer",
-    "description": "Expert code reviewer that analyzes code in any programming language for quality, security, performance, and best practices. Use this when you need detailed code analysis and improvement suggestions.",
-    "prompt": code_reviewer_prompt,
-    "tools": ["execute_bash"],
-}
-
-# Sub-agent for debugging assistance
-debugger_prompt = """You are an expert debugging assistant for all programming languages. Your job is to help identify and fix bugs in any codebase.
-
-When debugging:
-1. **Analyze Error Messages**: Interpret stack traces and error messages across languages
-2. **Identify Root Causes**: Find the underlying cause of issues
-3. **Suggest Fixes**: Provide specific solutions and code corrections
-4. **Test Solutions**: Verify that fixes work correctly using appropriate tools
-5. **Explain Issues**: Help understand why the bug occurred
-
-You have access to bash commands to run compilers, interpreters, debuggers, and other development tools.
-Always validate your solutions by testing the corrected code with the appropriate language tools.
-
-Be systematic in your approach:
-- First understand the error
-- Identify the problematic code section
-- Propose a fix
-- Test the fix using language-specific tools
-- Explain the solution"""
-
-debugger_agent = {
-    "name": "debugger",
-    "description": "Expert debugging assistant that helps identify and fix bugs in any programming language. Use when you encounter errors or unexpected behavior in code.",
-    "prompt": debugger_prompt,
-    "tools": ["execute_bash"],
-}
-
-# Sub-agent for test generation
-test_generator_prompt = """You are an expert test engineer for all programming languages. Your job is to create comprehensive test suites for any codebase.
-
-When generating tests:
-1. **Test Coverage**: Create tests that cover all functions, methods, and edge cases
-2. **Test Types**: Include unit tests, integration tests, and edge case tests
-3. **Frameworks**: Use appropriate testing frameworks for each language (Jest, pytest, JUnit, Go test, etc.)
-4. **Assertions**: Write meaningful assertions that validate expected behavior
-5. **Documentation**: Include clear test descriptions and comments
-
-Test categories to consider:
-- **Happy Path**: Normal expected inputs and outputs
-- **Edge Cases**: Boundary conditions, empty inputs, large inputs
-- **Error Cases**: Invalid inputs, exception handling
-- **Integration**: How components work together
-
-Use bash commands to run language-specific test frameworks and verify that tests execute successfully.
-Always verify that your tests can run successfully and provide meaningful feedback."""
-
-test_generator_agent = {
-    "name": "test-generator",
-    "description": "Expert test engineer that creates comprehensive test suites for any programming language. Use when you need to generate thorough test suites for your code.",
-    "prompt": test_generator_prompt,
-    "tools": ["execute_bash"],
-}
-
-# Main coding agent instructions
-coding_instructions = """You are an expert software developer and coding assistant. Your job is to help users with all aspects of programming across multiple languages including:
-
-## Core Capabilities
-- **Code Development**: Write clean, efficient, and well-documented code in any language
-- **Problem Solving**: Break down complex problems into manageable solutions
-- **Code Review**: Analyze and improve existing code across languages
-- **Debugging**: Identify and fix bugs in any programming language
-- **Testing**: Create comprehensive test suites using appropriate frameworks
-- **Code Optimization**: Improve performance and efficiency
-- **System Operations**: Handle build tools, package managers, and development environments
-
-## Workflow
-1. **Understand Requirements**: Carefully analyze what the user needs
-2. **Plan Solution**: Break down the problem into steps
-3. **Implement Code**: Write clean, well-documented code
-4. **Test Code**: Verify functionality with comprehensive tests
-5. **Review & Optimize**: Use sub-agents for code review and improvements
-
-## Available Sub-Agents
-- **code-reviewer**: For detailed code analysis and quality assessment across languages
-- **debugger**: For identifying and fixing bugs in any programming language
-- **test-generator**: For creating comprehensive test suites using appropriate frameworks
-
-## Best Practices
-- Write appropriate documentation for functions and classes
-- Follow language-specific style guidelines and conventions
-- Handle errors gracefully with appropriate exception handling
-- Write meaningful variable and function names
-- Use language-appropriate type systems when available
-- Create comprehensive tests for your code
-
-## Tools Available
-- **execute_bash**: Run shell commands for compilation, testing, package management, etc.
-- **http_request**: Make API calls, download resources, interact with web services
-
-## File Management
-- Save code to appropriate files with correct extensions
-- Organize projects with proper directory structure
-- Create documentation files when needed (README.md, etc.)
-- Use version control best practices
-
-## Development Operations
-You can handle:
-- Building and compiling code (make, cmake, cargo build, etc.)
-- Package management (npm, pip, gem, cargo, etc.)
-- Running tests (pytest, jest, junit, go test, etc.)
-- Code formatting (prettier, black, gofmt, etc.)
-- Static analysis and linting
-- Environment setup and configuration
-
-Always test your code using appropriate tools before presenting it to the user. If there are errors, use the debugger sub-agent to help identify and fix issues.
-
-Remember: Quality code is more important than quick code. Take time to write clean, tested, and well-documented solutions."""
-
-# Create the coding agent
 agent = create_deep_agent(
-    [execute_bash, http_request],
+    [execute_bash, http_request, web_search],
     coding_instructions,
-    subagents=[code_reviewer_agent, debugger_agent, test_generator_agent],
+    subagents=[code_reviewer_agent, test_generator_agent],
     local_filesystem=True,
-).with_config({"recursion_limit": 1000})
+    state_schema=CodingAgentState,
+    post_model_hook=post_model_hook,
+).with_config(config)

@@ -9,13 +9,14 @@ from deepagents.tools import (
     glob,
     grep,
 )
-from deepagents.real_fs_tools import (
-    write_file as real_write_file,
-    read_file as real_read_file,
-    ls as real_ls,
-    edit_file as real_edit_file,
-    glob as real_glob,
-    grep as real_grep,
+from deepagents.local_fs_tools import (
+    write_file as local_write_file,
+    read_file as local_read_file,
+    ls as local_ls,
+    edit_file as local_edit_file,
+    glob as local_glob,
+    grep as local_grep,
+    str_replace_based_edit_tool,
 )
 from deepagents.state import DeepAgentState
 from typing import Sequence, Union, Callable, Any, TypeVar, Type, Optional
@@ -38,7 +39,9 @@ These tools are also EXTREMELY helpful for planning tasks, and for breaking down
 It is critical that you mark todos as completed as soon as you are done with a task. Do not batch up multiple tasks before marking them as completed.
 ## `task`
 
-- When doing web search, prefer to use the `task` tool in order to reduce context usage."""
+- When doing web search, prefer to use the `task` tool in order to reduce context usage.
+
+"""
 
 
 def create_deep_agent(
@@ -50,6 +53,7 @@ def create_deep_agent(
     local_filesystem: bool = False,
     config_schema: Optional[Type[Any]] = None,
     checkpointer: Optional[Checkpointer] = None,
+    post_model_hook: Optional[Callable] = None,
 ):
     """Create a deep agent.
 
@@ -68,26 +72,26 @@ def create_deep_agent(
                 - `prompt` (used as the system prompt in the subagent)
                 - (optional) `tools`
         state_schema: The schema of the deep agent. Should subclass from DeepAgentState
-<<<<<<< HEAD
         local_filesystem: If True, use real filesystem tools instead of mock state-based tools
-=======
         config_schema: The schema of the deep agent.
         checkpointer: Optional checkpointer for persisting agent state between runs.
->>>>>>> master
+        post_model_hook: Optional post model hook function for intercepting tool calls.
     """
     prompt = instructions + base_prompt
     if local_filesystem:
         built_in_tools = [
             write_todos,
-            real_write_file,
-            real_read_file,
-            real_ls,
-            real_edit_file,
-            real_glob,
-            real_grep,
+            local_write_file,
+            local_read_file,
+            local_ls,
+            local_edit_file,
+            local_glob,
+            local_grep,
+            str_replace_based_edit_tool,
         ]
     else:
         built_in_tools = [write_todos, write_file, read_file, ls, edit_file, glob, grep]
+    
     if model is None:
         model = get_default_model()
     state_schema = state_schema or DeepAgentState
@@ -95,6 +99,7 @@ def create_deep_agent(
         list(tools) + built_in_tools, instructions, subagents or [], model, state_schema
     )
     all_tools = built_in_tools + list(tools) + [task_tool]
+    
     return create_react_agent(
         model,
         prompt=prompt,
@@ -102,4 +107,5 @@ def create_deep_agent(
         state_schema=state_schema,
         config_schema=config_schema,
         checkpointer=checkpointer,
+        post_model_hook=post_model_hook,
     )

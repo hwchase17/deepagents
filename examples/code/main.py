@@ -132,7 +132,7 @@ async def execute_task(user_input: str, progress: ProgressTracker):
 
         print(f"\n🤖 AI Agent is working on your request...")
 
-        # Stream the agent's response
+        # Stream the agent's response with interrupt handling
         async for _, chunk in agent.astream(
             {"messages": [{"role": "user", "content": user_input}]},
             stream_mode="updates",
